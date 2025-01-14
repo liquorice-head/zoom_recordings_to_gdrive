@@ -178,10 +178,3 @@ pip install -r requirements.txt
 ---
 
 """
-
-# Save to file
-file_path = "README.md"
-with open(file_path, "w") as readme_file:
-    readme_file.write(readme_content)
-
-file_path
