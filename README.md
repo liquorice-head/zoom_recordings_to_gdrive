@@ -1,6 +1,5 @@
 # Rewriting the README.md content due to environment reset
 
-readme_content = """
 # Zoom Recordings to Google Drive Script
 
 This script automates the process of downloading Zoom recordings, structuring them into an organized hierarchy, and uploading them to Google Drive or Shared Drive. It includes logging, tracking script executions, and managing recordings on Zoom.
@@ -176,5 +175,3 @@ pip install -r requirements.txt
    - Confirm Zoom credentials in `.env`.
 
 ---
-
-"""
