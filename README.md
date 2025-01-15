@@ -101,6 +101,7 @@ GOOGLE_DRIVE_PARENT_ID=GoogleDriveFolderID
 ZOOM_CLIENT_ID=YourZoomClientID
 ZOOM_CLIENT_SECRET=YourZoomClientSecret
 ZOOM_ACCOUNT_ID=YourZoomAccountID
+DOWNLOAD_DIR=downloads
 ```
 
 ---
