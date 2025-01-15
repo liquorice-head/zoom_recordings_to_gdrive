@@ -12,9 +12,9 @@ from tqdm import tqdm
 import re
 
 # Constants
-PROCESSING_DAYS = 60  # Process recordings from the last 60 days for subsequent runs
-DELETE_AFTER_DAYS = 365  # Delete recordings from Zoom older than 365 days
-LOG_RETENTION_DAYS = 180  # Retain log entries for 180 days
+PROCESSING_DAYS = 60
+DELETE_AFTER_DAYS = 365
+LOG_RETENTION_DAYS = 180
 
 # Paths
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -48,7 +48,6 @@ drive_service = build("drive", "v3", credentials=credentials)
 
 
 def setup_logging():
-    """Set up logging with rotation and cleanup."""
     logging.basicConfig(
         level=logging.DEBUG,
         format="%(asctime)s - %(levelname)s - %(message)s",
@@ -64,30 +63,24 @@ def setup_logging():
 
 
 def clean_old_logs():
-    """Remove log entries older than LOG_RETENTION_DAYS."""
     try:
         if not os.path.exists(LOG_FILE):
             return
-
         with open(LOG_FILE, "r") as log_file:
             lines = log_file.readlines()
-
         cutoff_date = datetime.now() - timedelta(days=LOG_RETENTION_DAYS)
         updated_lines = [
             line for line in lines
             if not re.match(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", line) or
             datetime.strptime(line.split(" - ")[0], "%Y-%m-%d %H:%M:%S") >= cutoff_date
         ]
-
         with open(LOG_FILE, "w") as log_file:
             log_file.writelines(updated_lines)
-
     except Exception as e:
         logging.error(f"Failed to clean old logs: {e}")
 
 
 def load_state():
-    """Load processed recordings state from file."""
     if os.path.exists(STATE_FILE):
         with open(STATE_FILE, "r") as f:
             return json.load(f)
@@ -95,13 +88,11 @@ def load_state():
 
 
 def save_state(state):
-    """Save processed recordings state to file."""
     with open(STATE_FILE, "w") as f:
         json.dump(state, f, indent=4)
 
 
 def load_run_count():
-    """Load the run count from file."""
     if os.path.exists(RUN_COUNT_FILE):
         with open(RUN_COUNT_FILE, "r") as f:
             return json.load(f).get("run_count", 0)
@@ -109,13 +100,11 @@ def load_run_count():
 
 
 def save_run_count(run_count):
-    """Save the run count to file."""
     with open(RUN_COUNT_FILE, "w") as f:
         json.dump({"run_count": run_count}, f, indent=4)
 
 
 def get_zoom_access_token():
-    """Generate access token using Zoom credentials."""
     url = "https://zoom.us/oauth/token"
     headers = {
         "Authorization": "Basic " + base64.b64encode(f"{ZOOM_CLIENT_ID}:{ZOOM_CLIENT_SECRET}".encode()).decode(),
@@ -128,7 +117,6 @@ def get_zoom_access_token():
 
 
 def fetch_zoom_recordings(token, from_date, to_date):
-    """Fetch recordings from Zoom."""
     url = "https://api.zoom.us/v2/accounts/me/recordings"
     headers = {"Authorization": f"Bearer {token}"}
     params = {"from": from_date, "to": to_date, "page_size": 100}
@@ -138,12 +126,20 @@ def fetch_zoom_recordings(token, from_date, to_date):
 
 
 def sanitize_filename(filename):
-    """Sanitize a filename by removing or replacing invalid characters."""
-    return re.sub(r'[<>:"/\\|?*]', '', filename).replace(' ', '_')
+    """
+    Sanitize a filename by removing or replacing invalid characters.
+    """
+    # Remove prohibited characters
+    sanitized = re.sub(r'[<>:"/\\|?*]', '', filename)  # Remove characters restricted by Windows/Google Drive
+    sanitized = sanitized.replace("'", "")  # Remove single quotes
+    sanitized = sanitized.replace("&", "and")  # Replace ampersand with "and"
+    sanitized = sanitized.replace("%", "percent")  # Replace percent sign with "percent"
+    sanitized = sanitized.replace(" ", "_")  # Replace spaces with underscores
+    sanitized = sanitized.strip()  # Trim leading and trailing whitespace
+    return sanitized
 
 
 def create_folder_on_google_drive(folder_name, parent_id=None):
-    """Create a folder on Google Drive or Shared Drive."""
     query = f"name='{folder_name}' and mimeType='application/vnd.google-apps.folder'"
     if parent_id:
         query += f" and '{parent_id}' in parents"
@@ -155,7 +151,6 @@ def create_folder_on_google_drive(folder_name, parent_id=None):
         includeItemsFromAllDrives=True
     ).execute()
     files = response.get("files", [])
-
     if files:
         return files[0]['id']
     else:
@@ -173,11 +168,9 @@ def create_folder_on_google_drive(folder_name, parent_id=None):
 
 
 def upload_to_google_drive(file_path, file_name, year, month, meeting_folder):
-    """Upload a file to Google Drive under a specific folder structure."""
     year_folder_id = create_folder_on_google_drive(str(year), GOOGLE_DRIVE_PARENT_ID)
     month_folder_id = create_folder_on_google_drive(f"{month:02d}", year_folder_id)
     meeting_folder_id = create_folder_on_google_drive(meeting_folder, month_folder_id)
-
     file_metadata = {"name": file_name, "parents": [meeting_folder_id]}
     media = MediaFileUpload(file_path, resumable=True)
     uploaded_file = drive_service.files().create(
@@ -186,12 +179,26 @@ def upload_to_google_drive(file_path, file_name, year, month, meeting_folder):
         fields="id",
         supportsAllDrives=True
     ).execute()
-
     logging.info(f"File {file_name} uploaded successfully with ID: {uploaded_file['id']}")
 
 
+def download_file(download_url, token, file_path):
+    try:
+        with requests.get(download_url, headers={"Authorization": f"Bearer {token}"}, stream=True) as r:
+            r.raise_for_status()
+            with open(file_path, "wb") as f:
+                for chunk in r.iter_content(chunk_size=8192):
+                    f.write(chunk)
+    except requests.exceptions.HTTPError as e:
+        if e.response.status_code == 401:
+            logging.warning("Unauthorized error detected. Refreshing token.")
+            return False
+        else:
+            raise
+    return True
+
+
 def process_recordings():
-    """Main logic for processing recordings."""
     state = load_state()
     run_count = load_run_count() + 1
     save_run_count(run_count)
@@ -231,13 +238,15 @@ def process_recordings():
             file_path = os.path.join(DOWNLOAD_DIR, file_name)
 
             try:
-                with requests.get(download_url, headers={"Authorization": f"Bearer {token}"}, stream=True) as r:
-                    r.raise_for_status()
-                    with open(file_path, "wb") as f:
-                        for chunk in r.iter_content(chunk_size=8192):
-                            f.write(chunk)
-                upload_to_google_drive(file_path, file_name, year, month, folder_name)
-                os.remove(file_path)
+                success = download_file(download_url, token, file_path)
+                if not success:
+                    token = get_zoom_access_token()
+                    success = download_file(download_url, token, file_path)
+                if success:
+                    upload_to_google_drive(file_path, file_name, year, month, folder_name)
+                    os.remove(file_path)
+                else:
+                    logging.error(f"Failed to download file after token refresh: {file_path}")
 
             except Exception as e:
                 logging.error(f"Error processing file {file_name}: {e}")
