@@ -12,9 +12,9 @@ from tqdm import tqdm
 import re
 
 # Constants
-PROCESSING_DAYS = 60
-DELETE_AFTER_DAYS = 365
-LOG_RETENTION_DAYS = 180
+PROCESSING_DAYS = 60  # Process recordings from the last 60 days for subsequent runs
+DELETE_AFTER_DAYS = 365  # Delete recordings from Zoom older than 365 days
+LOG_RETENTION_DAYS = 180  # Retain log entries for 180 days
 
 # Paths
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -48,6 +48,7 @@ drive_service = build("drive", "v3", credentials=credentials)
 
 
 def setup_logging():
+    """Set up logging with rotation and cleanup."""
     logging.basicConfig(
         level=logging.DEBUG,
         format="%(asctime)s - %(levelname)s - %(message)s",
@@ -63,6 +64,7 @@ def setup_logging():
 
 
 def clean_old_logs():
+    """Remove log entries older than LOG_RETENTION_DAYS."""
     try:
         if not os.path.exists(LOG_FILE):
             return
@@ -81,6 +83,7 @@ def clean_old_logs():
 
 
 def load_state():
+    """Load processed recordings state from file."""
     if os.path.exists(STATE_FILE):
         with open(STATE_FILE, "r") as f:
             return json.load(f)
@@ -88,11 +91,13 @@ def load_state():
 
 
 def save_state(state):
+    """Save processed recordings state to file."""
     with open(STATE_FILE, "w") as f:
         json.dump(state, f, indent=4)
 
 
 def load_run_count():
+    """Load the run count from file."""
     if os.path.exists(RUN_COUNT_FILE):
         with open(RUN_COUNT_FILE, "r") as f:
             return json.load(f).get("run_count", 0)
@@ -105,6 +110,7 @@ def save_run_count(run_count):
 
 
 def get_zoom_access_token():
+    """Generate access token using Zoom credentials."""
     url = "https://zoom.us/oauth/token"
     headers = {
         "Authorization": "Basic " + base64.b64encode(f"{ZOOM_CLIENT_ID}:{ZOOM_CLIENT_SECRET}".encode()).decode(),
@@ -117,6 +123,7 @@ def get_zoom_access_token():
 
 
 def fetch_zoom_recordings(token, from_date, to_date):
+    """Fetch recordings from Zoom."""
     url = "https://api.zoom.us/v2/accounts/me/recordings"
     headers = {"Authorization": f"Bearer {token}"}
     params = {"from": from_date, "to": to_date, "page_size": 100}
@@ -140,6 +147,7 @@ def sanitize_filename(filename):
 
 
 def create_folder_on_google_drive(folder_name, parent_id=None):
+    """Create a folder on Google Drive or Shared Drive."""
     query = f"name='{folder_name}' and mimeType='application/vnd.google-apps.folder'"
     if parent_id:
         query += f" and '{parent_id}' in parents"
@@ -168,6 +176,7 @@ def create_folder_on_google_drive(folder_name, parent_id=None):
 
 
 def upload_to_google_drive(file_path, file_name, year, month, meeting_folder):
+    """Upload a file to Google Drive under a specific folder structure."""
     year_folder_id = create_folder_on_google_drive(str(year), GOOGLE_DRIVE_PARENT_ID)
     month_folder_id = create_folder_on_google_drive(f"{month:02d}", year_folder_id)
     meeting_folder_id = create_folder_on_google_drive(meeting_folder, month_folder_id)
@@ -199,6 +208,7 @@ def download_file(download_url, token, file_path):
 
 
 def process_recordings():
+    """Main logic for processing recordings."""
     state = load_state()
     run_count = load_run_count() + 1
     save_run_count(run_count)
