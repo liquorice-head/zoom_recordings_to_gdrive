@@ -4,6 +4,7 @@ import requests
 import base64
 import logging
 from datetime import datetime, timedelta
+from dateutil.relativedelta import relativedelta  # pip install python-dateutil
 from dotenv import load_dotenv
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
@@ -12,9 +13,9 @@ from tqdm import tqdm
 import re
 
 # Constants
-PROCESSING_DAYS = 60  # Process recordings from the last 60 days for subsequent runs
-DELETE_AFTER_DAYS = 365  # Delete recordings from Zoom older than 365 days
-LOG_RETENTION_DAYS = 180  # Retain log entries for 180 days
+PROCESSING_DAYS = 60          # Process recordings from the last 60 days for subsequent runs
+DELETE_AFTER_DAYS = 365       # Delete recordings from Zoom older than 365 days
+LOG_RETENTION_DAYS = 180      # Retain log entries for 180 days
 
 # Paths
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -40,15 +41,14 @@ SCOPES = ["https://www.googleapis.com/auth/drive.file"]
 if not all([SERVICE_ACCOUNT_FILE, GOOGLE_DRIVE_PARENT_ID, ZOOM_CLIENT_ID, ZOOM_CLIENT_SECRET, ZOOM_ACCOUNT_ID]):
     raise ValueError("Missing required environment variables. Check your .env file.")
 
-credentials = Credentials.from_service_account_file(
-    SERVICE_ACCOUNT_FILE,
-    scopes=SCOPES
-)
+credentials = Credentials.from_service_account_file(SERVICE_ACCOUNT_FILE, scopes=SCOPES)
 drive_service = build("drive", "v3", credentials=credentials)
 
 
 def setup_logging():
-    """Set up logging with rotation and cleanup."""
+    """
+    Configure logging with rotation and cleanup.
+    """
     logging.basicConfig(
         level=logging.DEBUG,
         format="%(asctime)s - %(levelname)s - %(message)s",
@@ -64,18 +64,40 @@ def setup_logging():
 
 
 def clean_old_logs():
-    """Remove log entries older than LOG_RETENTION_DAYS."""
+    """
+    Remove log entries older than LOG_RETENTION_DAYS.
+    Takes into account microseconds in the log: 'YYYY-MM-DD HH:MM:SS,fff'
+    """
     try:
         if not os.path.exists(LOG_FILE):
             return
         with open(LOG_FILE, "r") as log_file:
             lines = log_file.readlines()
+
         cutoff_date = datetime.now() - timedelta(days=LOG_RETENTION_DAYS)
-        updated_lines = [
-            line for line in lines
-            if not re.match(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", line) or
-            datetime.strptime(line.split(" - ")[0], "%Y-%m-%d %H:%M:%S") >= cutoff_date
-        ]
+        updated_lines = []
+
+        for line in lines:
+            parts = line.split(" - ")
+            if len(parts) < 2:
+                updated_lines.append(line)
+                continue
+
+            timestamp_str = parts[0].strip()  # "2025-01-15 13:34:06,568"
+            # Attempt parsing with microseconds
+            try:
+                dt = datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S,%f")
+            except ValueError:
+                # If parsing fails, try without microseconds
+                try:
+                    dt = datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S")
+                except ValueError:
+                    updated_lines.append(line)
+                    continue
+
+            if dt >= cutoff_date:
+                updated_lines.append(line)
+
         with open(LOG_FILE, "w") as log_file:
             log_file.writelines(updated_lines)
     except Exception as e:
@@ -83,7 +105,9 @@ def clean_old_logs():
 
 
 def load_state():
-    """Load processed recordings state from file."""
+    """
+    Load the processed recordings state from a file.
+    """
     if os.path.exists(STATE_FILE):
         with open(STATE_FILE, "r") as f:
             return json.load(f)
@@ -91,13 +115,17 @@ def load_state():
 
 
 def save_state(state):
-    """Save processed recordings state to file."""
+    """
+    Save the processed recordings state to a file.
+    """
     with open(STATE_FILE, "w") as f:
         json.dump(state, f, indent=4)
 
 
 def load_run_count():
-    """Load the run count from file."""
+    """
+    Load the run count from a file.
+    """
     if os.path.exists(RUN_COUNT_FILE):
         with open(RUN_COUNT_FILE, "r") as f:
             return json.load(f).get("run_count", 0)
@@ -105,12 +133,17 @@ def load_run_count():
 
 
 def save_run_count(run_count):
+    """
+    Save the run count to a file.
+    """
     with open(RUN_COUNT_FILE, "w") as f:
         json.dump({"run_count": run_count}, f, indent=4)
 
 
 def get_zoom_access_token():
-    """Generate access token using Zoom credentials."""
+    """
+    Generate an access token using Zoom credentials.
+    """
     url = "https://zoom.us/oauth/token"
     headers = {
         "Authorization": "Basic " + base64.b64encode(f"{ZOOM_CLIENT_ID}:{ZOOM_CLIENT_SECRET}".encode()).decode(),
@@ -122,65 +155,153 @@ def get_zoom_access_token():
     return response.json().get("access_token")
 
 
-def fetch_zoom_recordings(token, from_date, to_date):
-    """Fetch recordings from Zoom."""
+# ------------------------------------------------------------------------------
+# Functions for paginated loading and segmented (monthly) retrieval
+# ------------------------------------------------------------------------------
+def fetch_zoom_recordings_page(token, from_date, to_date, next_page_token=None, mc=False):
+    """
+    Retrieve one "page" (page_size=300) of Zoom recordings,
+    taking into account next_page_token (if any), returning JSON response.
+    """
     url = "https://api.zoom.us/v2/accounts/me/recordings"
     headers = {"Authorization": f"Bearer {token}"}
-    params = {"from": from_date, "to": to_date, "page_size": 100}
+    params = {
+        "from": from_date,
+        "to": to_date,
+        "page_size": 300  # max page_size for Zoom
+    }
+    if mc:
+        params["mc"] = "true"
+
+    if next_page_token:
+        params["next_page_token"] = next_page_token
+
     response = requests.get(url, headers=headers, params=params)
     response.raise_for_status()
-    return response.json().get("meetings", [])
+    return response.json()
 
 
+def fetch_zoom_recordings(token, from_date, to_date, mc=False):
+    """
+    Get all recordings from Zoom for the range from_date–to_date,
+    using paginated loading (next_page_token).
+    """
+    all_meetings = []
+    next_page_token = None
+
+    while True:
+        data = fetch_zoom_recordings_page(token, from_date, to_date, next_page_token, mc=mc)
+        meetings = data.get("meetings", [])
+        all_meetings.extend(meetings)
+
+        next_page_token = data.get("next_page_token")
+        if not next_page_token:
+            break
+
+    return all_meetings
+
+
+def fetch_zoom_recordings_in_chunks(token, start_date, end_date, mc=False):
+    """
+    Split the request into monthly intervals (avoiding the 6-month jump that could skip months).
+    Retrieve all recordings by calling fetch_zoom_recordings within each segment.
+    """
+    all_meetings = []
+    current_start = start_date
+
+    while current_start < end_date:
+        # Add 1 month to the current start
+        current_end = current_start + relativedelta(months=1)
+        if current_end > end_date:
+            current_end = end_date
+
+        from_str = current_start.strftime("%Y-%m-%d")
+        to_str = current_end.strftime("%Y-%m-%d")
+
+        chunk_meetings = fetch_zoom_recordings(token, from_str, to_str, mc=mc)
+        all_meetings.extend(chunk_meetings)
+
+        # The next interval starts 1 day after current_end
+        current_start = current_end + timedelta(days=1)
+
+    return all_meetings
+
+
+# ------------------------------------------------------------------------------
+# Other helper functions
+# ------------------------------------------------------------------------------
 def sanitize_filename(filename):
     """
     Sanitize a filename by removing or replacing invalid characters.
     """
-    # Remove prohibited characters
-    sanitized = re.sub(r'[<>:"/\\|?*]', '', filename)  # Remove characters restricted by Windows/Google Drive
-    sanitized = sanitized.replace("'", "")  # Remove single quotes
-    sanitized = sanitized.replace("&", "and")  # Replace ampersand with "and"
-    sanitized = sanitized.replace("%", "percent")  # Replace percent sign with "percent"
-    sanitized = sanitized.replace(" ", "_")  # Replace spaces with underscores
-    sanitized = sanitized.strip()  # Trim leading and trailing whitespace
+    sanitized = re.sub(r'[<>:"/\\|?*]', '', filename)
+    sanitized = sanitized.replace("'", "")
+    sanitized = sanitized.replace("&", "and")
+    sanitized = sanitized.replace("%", "percent")
+    sanitized = sanitized.replace(" ", "_")
+    sanitized = sanitized.strip()
     return sanitized
 
 
 def create_folder_on_google_drive(folder_name, parent_id=None):
-    """Create a folder on Google Drive or Shared Drive."""
-    query = f"name='{folder_name}' and mimeType='application/vnd.google-apps.folder'"
+    """
+    Create (or find existing) folder (folder_name) in Google Drive under parent_id, if provided.
+    Includes extra logs and trashed=false filtering.
+    """
+    query = f"name='{folder_name}' and mimeType='application/vnd.google-apps.folder' and trashed=false"
     if parent_id:
         query += f" and '{parent_id}' in parents"
+
+    logging.debug(f"[GDRIVE] Folder search query: {query}")
+
     response = drive_service.files().list(
         q=query,
         spaces="drive",
-        fields="files(id, name)",
+        fields="files(id, name, parents)",
         supportsAllDrives=True,
         includeItemsFromAllDrives=True
     ).execute()
     files = response.get("files", [])
+
+    logging.debug(f"[GDRIVE] Found files: {files}")
+
     if files:
-        return files[0]['id']
+        folder_id = files[0]['id']
+        logging.debug(f"[GDRIVE] Folder '{folder_name}' already exists with ID={folder_id}")
+        return folder_id
     else:
+        logging.debug(f"[GDRIVE] Creating folder '{folder_name}' under parent={parent_id}")
         file_metadata = {
             "name": folder_name,
-            "mimeType": "application/vnd.google-apps.folder",
-            "parents": [parent_id]
+            "mimeType": "application/vnd.google-apps.folder"
         }
+        if parent_id:
+            file_metadata["parents"] = [parent_id]
+
         folder = drive_service.files().create(
             body=file_metadata,
             fields="id",
             supportsAllDrives=True
         ).execute()
-        return folder["id"]
+
+        folder_id = folder["id"]
+        logging.debug(f"[GDRIVE] Created folder '{folder_name}' with ID={folder_id}")
+        return folder_id
 
 
 def upload_to_google_drive(file_path, file_name, year, month, meeting_folder):
-    """Upload a file to Google Drive under a specific folder structure."""
+    """
+    Upload a file to Google Drive under the folder structure:
+       /[parent]/<year>/<month>/<meeting_folder>/<file_name>
+    """
     year_folder_id = create_folder_on_google_drive(str(year), GOOGLE_DRIVE_PARENT_ID)
     month_folder_id = create_folder_on_google_drive(f"{month:02d}", year_folder_id)
     meeting_folder_id = create_folder_on_google_drive(meeting_folder, month_folder_id)
-    file_metadata = {"name": file_name, "parents": [meeting_folder_id]}
+
+    file_metadata = {
+        "name": file_name,
+        "parents": [meeting_folder_id]
+    }
     media = MediaFileUpload(file_path, resumable=True)
     uploaded_file = drive_service.files().create(
         body=file_metadata,
@@ -192,6 +313,10 @@ def upload_to_google_drive(file_path, file_name, year, month, meeting_folder):
 
 
 def download_file(download_url, token, file_path):
+    """
+    Download a file from download_url (secured by a Bearer token).
+    Returns True if successful, or False if a token refresh is needed.
+    """
     try:
         with requests.get(download_url, headers={"Authorization": f"Bearer {token}"}, stream=True) as r:
             r.raise_for_status()
@@ -207,52 +332,84 @@ def download_file(download_url, token, file_path):
     return True
 
 
+# ------------------------------------------------------------------------------
+# Main logic
+# ------------------------------------------------------------------------------
 def process_recordings():
-    """Main logic for processing recordings."""
+    """
+    Main workflow:
+    1. Check how many times the script has run (run_count).
+    2. If it's the first run — get all possible recordings from 1970 (in practice, Zoom only returns up to 6 months back).
+    3. If not the first run — get recordings for the last PROCESSING_DAYS days.
+    4. Download, upload to Google Drive, and mark in STATE_FILE as processed.
+    """
     state = load_state()
     run_count = load_run_count() + 1
     save_run_count(run_count)
 
     if run_count == 1:
         logging.info("First run detected: Processing all available recordings.")
-        from_date = "1970-01-01"
+        start_date = datetime(1970, 1, 1)
     else:
         logging.info(f"Run #{run_count}: Processing recordings from the last {PROCESSING_DAYS} days.")
-        from_date = (datetime.now() - timedelta(days=PROCESSING_DAYS)).strftime("%Y-%m-%d")
+        start_date = datetime.now() - timedelta(days=PROCESSING_DAYS)
 
-    to_date = datetime.now().strftime("%Y-%m-%d")
+    end_date = datetime.now()
+
+    # Get token
     token = get_zoom_access_token()
-    recordings = fetch_zoom_recordings(token, from_date, to_date)
+
+    # Gather all recordings for the period start_date – end_date
+    recordings = fetch_zoom_recordings_in_chunks(token, start_date, end_date, mc=False)
 
     if not recordings:
         logging.info("No recordings found.")
         return
 
+    # Process each recording
     for recording in tqdm(recordings, desc="Processing recordings"):
         meeting_id = recording["id"]
         if meeting_id in state:
             logging.info(f"Skipping already processed recording: {meeting_id}")
             continue
 
-        folder_name = sanitize_filename(f"{recording['topic']}_{recording['host_email']}_{recording['start_time'][:10]}")
-        year, month = datetime.now().year, datetime.now().month
+        # Folder name like: "Topic_host_email_YYYY-MM-DD"
+        folder_name = sanitize_filename(
+            f"{recording['topic']}_{recording['host_email']}_{recording['start_time'][:10]}"
+        )
 
-        for file in recording.get("recording_files", []):
-            download_url = file.get("download_url")
+        # Parse the actual meeting date (year/month) from start_time
+        start_time_str = recording["start_time"]
+        dt_str = start_time_str[:19]
+        try:
+            meeting_dt = datetime.strptime(dt_str, "%Y-%m-%dT%H:%M:%S")
+        except ValueError:
+            # fallback, e.g. "YYYY-MM-DD HH:MM:SS"
+            meeting_dt = datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S")
+
+        year = meeting_dt.year
+        month = meeting_dt.month
+
+        # Download all recording files
+        for file_info in recording.get("recording_files", []):
+            download_url = file_info.get("download_url")
             if not download_url:
                 logging.warning(f"Invalid file in meeting {meeting_id}. Skipping.")
                 continue
 
-            file_extension = f".{file['file_type'].lower()}" if file.get("file_type") else ".bin"
-            file_name = sanitize_filename(f"{folder_name}_{file['id']}{file_extension}")
+            file_extension = f".{file_info['file_type'].lower()}" if file_info.get("file_type") else ".bin"
+            file_name = sanitize_filename(f"{folder_name}_{file_info['id']}{file_extension}")
             file_path = os.path.join(DOWNLOAD_DIR, file_name)
 
             try:
                 success = download_file(download_url, token, file_path)
                 if not success:
+                    # Try refreshing the token and retry
                     token = get_zoom_access_token()
                     success = download_file(download_url, token, file_path)
+
                 if success:
+                    # Use the parsed year, month
                     upload_to_google_drive(file_path, file_name, year, month, folder_name)
                     os.remove(file_path)
                 else:
@@ -261,6 +418,7 @@ def process_recordings():
             except Exception as e:
                 logging.error(f"Error processing file {file_name}: {e}")
 
+        # Save to state that this meeting_id was processed
         state[meeting_id] = {"processed_at": datetime.now().isoformat()}
         save_state(state)
 
