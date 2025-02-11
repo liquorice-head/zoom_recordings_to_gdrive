@@ -6,7 +6,6 @@ import logging
 import argparse
 from datetime import datetime, timedelta
 from dateutil.relativedelta import relativedelta  # pip install python-dateutil
-from dateutil.relativedelta import relativedelta  # pip install python-dateutil
 from dotenv import load_dotenv
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
@@ -16,11 +15,11 @@ import re
 
 # ------------------------------------------------------------------------------
 # Constants
-PROCESSING_DAYS = 60          # Process recordings from the last 60 days for subsequent runs
-DELETE_AFTER_DAYS = 365       # Delete recordings from Zoom older than 365 days
-LOG_RETENTION_DAYS = 180      # Retain log entries for 180 days
+# ------------------------------------------------------------------------------
+PROCESSING_DAYS = 60
+DELETE_AFTER_DAYS = 365 
+LOG_RETENTION_DAYS = 180
 
-# Paths
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 LOG_FILE = os.path.join(BASE_DIR, "script.log")
 STATE_FILE = os.path.join(BASE_DIR, "processed_recordings.json")
@@ -227,7 +226,6 @@ def create_folder_on_google_drive(folder_name, parent_id=None):
         q=query,
         spaces="drive",
         fields="files(id, name, parents)",
-        fields="files(id, name, parents)",
         supportsAllDrives=True,
         includeItemsFromAllDrives=True
     ).execute()
@@ -238,10 +236,8 @@ def create_folder_on_google_drive(folder_name, parent_id=None):
         logging.debug(f"[GDRIVE] Folder '{folder_name}' exists: {folder_id}")
         return folder_id
     else:
-        logging.debug(f"[GDRIVE] Creating folder '{folder_name}' under parent={parent_id}")
         file_metadata = {
             "name": folder_name,
-            "mimeType": "application/vnd.google-apps.folder"
             "mimeType": "application/vnd.google-apps.folder"
         }
         if parent_id:
@@ -365,7 +361,6 @@ def process_recordings():
         logging.info("No recordings found.")
         return
 
-    # Process each recording
     for recording in tqdm(recordings, desc="Processing recordings"):
         meeting_id = recording["id"]
         if meeting_id in state:
@@ -397,12 +392,9 @@ def process_recordings():
             try:
                 success = download_file(download_url, token, file_path)
                 if not success:
-                    # Try refreshing the token and retry
                     token = get_zoom_access_token()
                     success = download_file(download_url, token, file_path)
-
                 if success:
-                    # Use the parsed year, month
                     upload_to_google_drive(file_path, file_name, year, month, folder_name)
                     os.remove(file_path)
                 else:
@@ -410,7 +402,6 @@ def process_recordings():
             except Exception as e:
                 logging.error(f"Error processing file {file_name}: {e}")
 
-        # Save to state that this meeting_id was processed
         state[meeting_id] = {"processed_at": datetime.now().isoformat()}
         save_state(state)
 
