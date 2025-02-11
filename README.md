@@ -32,6 +32,23 @@ zoom_recordings_to_gdrive/
 ├── downloads/               # Temporary download folder
 ├── script.log               # Log file
 ```
+---
+
+## Usage
+
+```bash
+python3 zoom_recs_uploader.py
+```
+
+```bash
+python3 zoom_recs_uploader.py --delete
+```
+1.	Normal Mode (no arguments)
+	•	Processes new Zoom recordings (downloads & uploads to Drive)
+	•	Deletes recordings older than DELETE_AFTER_DAYS across the entire Zoom account
+2.	Delete-Only Mode (--delete)
+	•	Skips downloading & uploading
+	•	Only deletes Zoom recordings older than DELETE_AFTER_DAYS
 
 ---
 
